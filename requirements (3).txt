@@ -1,0 +1,5 @@
+# LAN Chat — Python dependencies
+# Core application: zero external dependencies (pure stdlib)
+# Optional: test runner only
+
+pytest>=7.0      # optional — tests also run with: python tests.py
