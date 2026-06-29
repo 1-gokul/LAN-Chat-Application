@@ -282,6 +282,10 @@ pytest tests.py -v
 
 ---
 
+## Deployment
+
+The application is deployed on **Railway**, providing simple cloud hosting and easy deployment.
+
 ## Possible Extensions
 
 These are natural next steps to discuss in interviews or implement:
