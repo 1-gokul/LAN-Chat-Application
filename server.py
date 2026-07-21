@@ -32,6 +32,7 @@ from protocol import (
     encode,
     MAX_MESSAGE_BYTES,
 )
+from kafka_bus import ChatKafkaBus, TOPIC_BROADCAST, TOPIC_WHISPER, TOPIC_SYSTEM
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -53,8 +54,9 @@ class ClientRegistry:
     """Thread-safe map of username → ClientHandler."""
 
     def __init__(self):
-        self._clients: dict[str, "ClientHandler"] = {}
-        self._lock = threading.Lock()
+    self._clients: dict[str, "ClientHandler"] = {}
+    self._lock = threading.Lock()
+    self.kafka_bus: Optional["ChatKafkaBus"] = None   # set by ChatServer if enabled
 
     # -- registration --
 
@@ -252,34 +254,43 @@ class ClientHandler(threading.Thread):
                 return
             if len(body) > 500:
                 self.send_raw(encode(MessageType.ERROR, "SERVER",
-                                     "Message too long (max 500 chars)"))
+                                      "Message too long (max 500 chars)"))
                 return
             out = encode(MessageType.BROADCAST, self._username, body)
-            self._registry.broadcast(out)          # sender also gets it back
+            self._registry.broadcast(out)  # sender also gets it back
+        
+            if self._registry.kafka_bus:
+                self._registry.kafka_bus.publish_broadcast(self._username, body)
 
         elif msg_type == MessageType.WHISPER:
-            # payload format: "target::body"
             if "::" not in env["payload"]:
                 self.send_raw(encode(MessageType.ERROR, "SERVER",
-                                     "Whisper format: /w <user> <message>"))
+                                      "Whisper format: /w <user> <message>"))
                 return
             target, body = env["payload"].split("::", 1)
             target = target.strip()
-            body   = body.strip()
+            body = body.strip()
             if target == self._username:
                 self.send_raw(encode(MessageType.ERROR, "SERVER",
-                                     "You cannot whisper to yourself"))
+                                      "You cannot whisper to yourself"))
                 return
-            pm = encode(MessageType.PRIVATE, self._username,
-                        f"(whisper) {body}")
+        
+            pm = encode(MessageType.PRIVATE, self._username, f"(whisper) {body}")
             delivered = self._registry.whisper(target, pm)
+        
             if delivered:
-                # Echo back to sender so they see the whisper they sent
                 self.send_raw(encode(MessageType.PRIVATE, "SERVER",
-                                     f"[To {target}] {body}"))
+                                      f"[To {target}] {body}"))
+            elif self._registry.kafka_bus:
+                # Not connected to this instance -- try other instances via Kafka.
+                # Fire-and-forget: we can't synchronously confirm delivery on a
+                # remote instance, so we optimistically echo back to the sender.
+                self._registry.kafka_bus.publish_whisper(self._username, target, body)
+                self.send_raw(encode(MessageType.PRIVATE, "SERVER",
+                                      f"[To {target}] {body}"))
             else:
                 self.send_raw(encode(MessageType.ERROR, "SERVER",
-                                     f"User '{target}' not found"))
+                                      f"User '{target}' not found"))
 
         elif msg_type == MessageType.LIST:
             users = ", ".join(sorted(self._registry.usernames()))
