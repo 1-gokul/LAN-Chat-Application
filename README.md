@@ -78,11 +78,6 @@ A fully functional, multithreaded LAN chat server and client built in Python usi
                                v                v
                       All Connected         Target Client
                           Clients
-
-                               |
-                               | (Optional)
-                               v
-
                      +-------------------------------------------+
                      |           ChatKafkaBus                    |
                      |-------------------------------------------|
