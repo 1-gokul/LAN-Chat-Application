@@ -393,5 +393,3 @@ These are natural next steps to discuss in interviews or implement:
 10. **Admin commands** — kick, ban, mute via a privileged client role
 11. **Global presence store** — back the Kafka whisper relay with Redis or a Kafka-compacted topic so cross-instance whispers can be validated (and errored) synchronously instead of optimistically
 ```
-
-That's the whole file, ready to overwrite your existing `README.md`.
