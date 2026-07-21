@@ -1,6 +1,9 @@
+Here's the complete updated `README.md`, merged with your current formatting conventions (```json, ```bash fences, your table style):
+
+```markdown
 # LAN Chat Application
 
-A fully functional, multithreaded LAN chat server and client built in Python using raw TCP sockets — no third-party networking libraries.
+A fully functional, multithreaded LAN chat server and client built in Python using raw TCP sockets — no third-party networking libraries. Optionally backed by Apache Kafka to link multiple server instances into one distributed chat network.
 
 ---
 
@@ -8,6 +11,7 @@ A fully functional, multithreaded LAN chat server and client built in Python usi
 
 - [Features](#features)
 - [Architecture](#architecture)
+- [Distributed Mode (Kafka)](#distributed-mode-kafka)
 - [Protocol Design](#protocol-design)
 - [Project Structure](#project-structure)
 - [Setup & Usage](#setup--usage)
@@ -32,6 +36,7 @@ A fully functional, multithreaded LAN chat server and client built in Python usi
 - **Graceful disconnect** — LEAVE message notifies other users
 - **Username validation** — enforced server-side with clear rejection reasons
 - **Server-full rejection** — configurable max client cap
+- **Optional Kafka relay** — link multiple independent server processes into one chat network, with no code changes required to run standalone
 - **27-test suite** — unit tests, concurrency tests, and full integration tests over loopback
 
 ---
@@ -58,6 +63,11 @@ A fully functional, multithreaded LAN chat server and client built in Python usi
 │        │                                      │    │
 │        ├──── broadcast() → all handlers ──────┘    │
 │        └──── whisper()   → target handler          │
+│                    │                                 │
+│                    ▼ (if enabled)                    │
+│              ChatKafkaBus                            │
+│              ───────────                             │
+│        publish/consume chat.* topics                 │
 └─────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────┐
@@ -74,6 +84,45 @@ A fully functional, multithreaded LAN chat server and client built in Python usi
 │   recv() → _render()  ◄──────── │◄── TCP ◄── Server
 └─────────────────────────────────┘
 ```
+
+---
+
+## Distributed Mode (Kafka)
+
+By default the app runs exactly as before: a single process, single in-memory `ClientRegistry`, no external dependencies. Passing `--kafka-bootstrap` at startup turns each server process into one node of a distributed chat network — any number of independent `server.py` processes (different hosts, different ports, or both) can share one chat room by relaying messages through Kafka instead of only routing within their own process.
+
+### Why
+
+The original design's `ClientRegistry` only knows about clients connected to *that* process. Two separate `python server.py` instances have no way to talk to each other. Kafka sits between them as a shared message bus, so a message from a client on instance A gets replayed to clients on instance B (and C, D, ...) without those instances knowing about each other directly.
+
+### Topics
+
+| Topic              | Carries                                                                                  |
+|--------------------|-------------------------------------------------------------------------------------------|
+| `chat.broadcast`   | Public TEXT messages                                                                     |
+| `chat.whisper`     | Private WHISPER messages (delivered only if target is local to the consuming instance)   |
+| `chat.system`      | JOIN / LEAVE presence announcements                                                       |
+
+Every published message is tagged with the originating instance's ID so that instance ignores its own echo when it reads the topic back (it already applied the message to its local clients synchronously).
+
+### Running it locally
+
+```bash
+# 1. Start a single-broker Kafka (KRaft mode, no Zookeeper)
+docker compose up -d
+
+# 2. Start two independent server instances sharing the same Kafka cluster
+python server.py --port 9000 --kafka-bootstrap localhost:9092 --instance-id server-A
+python server.py --port 9001 --kafka-bootstrap localhost:9092 --instance-id server-B
+
+# 3. Connect clients to either port — they'll all see each other's messages
+python client.py --port 9000 --username Alice
+python client.py --port 9001 --username Bob
+```
+
+### Known tradeoff
+
+Whisper delivery across instances is fire-and-forget: if the target user doesn't exist on *any* instance, the sender still gets an optimistic `[To target]` confirmation rather than an error, since there's no synchronous cross-instance acknowledgment. A production version would add a presence topic or shared key-value store (e.g. Redis) to validate usernames globally before confirming delivery.
 
 ---
 
@@ -136,11 +185,13 @@ Client                         Server
 
 ```
 lan-chat/
-├── protocol.py    # Message types, encode/decode, FramedSocketReader
-├── server.py      # ChatServer, ClientRegistry, ClientHandler
-├── client.py      # ChatClient, ReceiverThread
-├── tests.py       # 27 unit + integration tests
+├── protocol.py        # Message types, encode/decode, FramedSocketReader
+├── server.py          # ChatServer, ClientRegistry, ClientHandler
+├── client.py          # ChatClient, ReceiverThread
+├── kafka_bus.py       # ChatKafkaBus: producer + consumer relay for distributed mode
+├── tests.py           # 27 unit + integration tests
 ├── requirements.txt
+├── docker-compose.yml # Local single-broker Kafka for distributed mode
 └── README.md
 ```
 
@@ -153,9 +204,10 @@ lan-chat/
 - Python 3.10+ (uses `match`-style type hints; `list[bytes]` syntax)
 - No external packages required for core functionality
 - `pytest` optional for test runner
+- `kafka-python` + a running Kafka broker, only if using `--kafka-bootstrap` (distributed mode)
 
 ```bash
-pip install -r requirements.txt   # only needed for pytest
+pip install -r requirements.txt   # pytest + kafka-python
 ```
 
 ### Start the server
@@ -166,6 +218,9 @@ python server.py
 
 # Custom options
 python server.py --host 192.168.1.10 --port 9000 --max-clients 100
+
+# Distributed mode (see "Distributed Mode (Kafka)" above)
+python server.py --port 9000 --kafka-bootstrap localhost:9092 --instance-id server-A
 ```
 
 ### Connect a client
@@ -229,6 +284,10 @@ TCP is a **stream protocol** — `recv()` returns *some* bytes, not necessarily 
 
 Validation lives in `server.py`, not `client.py`. The client is untrusted — it can be replaced by `nc` or a custom script. The server is the authority.
 
+### Why Kafka instead of just connecting servers directly?
+
+A direct mesh (each server dialing every other server) needs O(n²) connections and falls apart when instances come and go. Kafka decouples producers from consumers: any instance can publish without knowing who — or how many — other instances exist, and new instances can join the relay just by subscribing to the same topics. It also gives an at-least-once delivery guarantee and a natural audit log of chat traffic, both useful properties for a production messaging layer.
+
 ---
 
 ## Concurrency Model
@@ -240,9 +299,10 @@ ClientHandler[n]  →   ClientRegistry._clients   ClientRegistry._lock
 ClientHandler[n]  →   ClientHandler._conn        ClientHandler._send_lock
 MainThread        →   server socket              single writer (main only)
 ReceiverThread    →   socket (reads only)        no lock needed (single reader)
+kafka-consumer    →   ClientRegistry (via _on_kafka_message)   ClientRegistry._lock
 ```
 
-Key invariant: **only one thread ever reads from a given client socket** (the ClientHandler for that client). Writes can come from any thread (broadcast), so `_send_lock` serialises them.
+Key invariant: **only one thread ever reads from a given client socket** (the ClientHandler for that client). Writes can come from any thread (broadcast, or the Kafka consumer thread relaying a remote message), so `_send_lock` serialises them.
 
 ---
 
@@ -256,6 +316,8 @@ Key invariant: **only one thread ever reads from a given client socket** (the Cl
 | Handshake timeout (10s)        | Connection closed, logged as warning               |
 | Server full                    | REJECT sent before ClientHandler is created        |
 | Unknown command from client    | ERROR message sent, connection kept alive          |
+| Kafka broker unreachable       | Publish errors logged, local delivery still works  |
+| Whisper to remote-only user    | Optimistic delivery, no cross-instance ack (see [Distributed Mode](#distributed-mode-kafka)) |
 
 ---
 
@@ -300,3 +362,7 @@ These are natural next steps to discuss in interviews or implement:
 8. **Async rewrite** — migrate to `asyncio` to support thousands of clients
 9. **File transfer** — negotiate a side channel for binary payloads
 10. **Admin commands** — kick, ban, mute via a privileged client role
+11. **Global presence store** — back the Kafka whisper relay with Redis or a Kafka-compacted topic so cross-instance whispers can be validated (and errored) synchronously instead of optimistically
+```
+
+That's the whole file, ready to overwrite your existing `README.md`.
