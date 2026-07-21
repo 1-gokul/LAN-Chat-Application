@@ -1,4 +1,3 @@
-Here's the complete updated `README.md`, merged with your current formatting conventions (```json, ```bash fences, your table style):
 
 ```markdown
 # LAN Chat Application
