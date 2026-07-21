@@ -44,45 +44,80 @@ A fully functional, multithreaded LAN chat server and client built in Python usi
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                     SERVER                          │
-│                                                     │
-│   MainThread                                        │
-│   ─────────                                         │
-│   socket.accept() loop                              │
-│        │                                            │
-│        ▼  (per connection)                          │
-│   ClientHandler (Thread)   ←──────────────────┐    │
-│   ─────────────────────                       │    │
-│   recv loop → _handle()                       │    │
-│        │                                      │    │
-│        ▼                                      │    │
-│   ClientRegistry (shared, thread-safe)        │    │
-│   ───────────────────────────────────         │    │
-│   { username → ClientHandler }                │    │
-│        │                                      │    │
-│        ├──── broadcast() → all handlers ──────┘    │
-│        └──── whisper()   → target handler          │
-│                    │                                 │
-│                    ▼ (if enabled)                    │
-│              ChatKafkaBus                            │
-│              ───────────                             │
-│        publish/consume chat.* topics                 │
-└─────────────────────────────────────────────────────┘
+## Architecture
 
-┌─────────────────────────────────┐
-│             CLIENT              │
-│                                 │
-│   MainThread                    │
-│   ──────────                    │
-│   stdin input → _dispatch()     │
-│        │                        │
-│        └──── sendall() ──────►  │──► TCP ──► Server
-│                                 │
-│   ReceiverThread (daemon)       │
-│   ──────────────────────        │
-│   recv() → _render()  ◄──────── │◄── TCP ◄── Server
-└─────────────────────────────────┘
+```text
+                        +-------------------------------------------+
+                        |                 SERVER                    |
+                        +-------------------------------------------+
+                        | Main Thread                               |
+                        |  - socket.accept()                        |
+                        |        |                                  |
+                        |        v                                  |
+                        |  Creates one ClientHandler thread/client  |
+                        +-------------------+-----------------------+
+                                            |
+                                            v
+                     +-------------------------------------------+
+                     |        ClientHandler (Thread)             |
+                     |-------------------------------------------|
+                     | recv() -> parse -> handle message         |
+                     | send() protected by _send_lock            |
+                     +-------------------+-----------------------+
+                                         |
+                                         v
+                     +-------------------------------------------+
+                     |      ClientRegistry (Thread Safe)         |
+                     |-------------------------------------------|
+                     | username -> ClientHandler mapping         |
+                     | protected by registry lock                |
+                     +---------+----------------+----------------+
+                               |                |
+                 Broadcast     |                |    Whisper
+                               |                |
+                               v                v
+                      All Connected         Target Client
+                          Clients
+
+                               |
+                               | (Optional)
+                               v
+
+                     +-------------------------------------------+
+                     |           ChatKafkaBus                    |
+                     |-------------------------------------------|
+                     | Publish / Consume                         |
+                     | chat.broadcast                            |
+                     | chat.whisper                              |
+                     | chat.system                               |
+                     +-------------------------------------------+
+```
+
+### Client
+
+```text
+                 +----------------------------------+
+                 |             CLIENT               |
+                 +----------------------------------+
+                 | Main Thread                      |
+                 |----------------------------------|
+                 | Read keyboard input              |
+                 | Parse commands                   |
+                 | sendall() to server              |
+                 +----------------+-----------------+
+                                  |
+                                  |
+                               TCP Socket
+                                  |
+                                  |
+                 +----------------v-----------------+
+                 | Receiver Thread (Daemon)         |
+                 |----------------------------------|
+                 | recv()                           |
+                 | Decode JSON                      |
+                 | Render messages                  |
+                 +----------------------------------+
+```
 ```
 
 ---
